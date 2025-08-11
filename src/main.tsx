@@ -23,7 +23,7 @@ import { SocketProvider } from '@/context/SocketContext';
 const queryClient = new QueryClient();
 
 function AppProviders() {
-  const endpoint = 'https://api.mainnet-beta.solana.com';
+  const endpoint = import.meta.env.VITE_SOLANA_RPC || (import.meta.env.VITE_SOLANA_CLUSTER === 'mainnet' ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com');
   const wallets = useMemo(() => [
     new PhantomWalletAdapter(),
     new SolflareWalletAdapter(),

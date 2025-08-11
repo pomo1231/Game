@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useWallet } from '@solana/wallet-adapter-react';
 import { Slider } from './ui/slider';
 import crypto from 'crypto-js';
+import { startSoloOnchain, revealAndResolveSoloOnchain, isOnchainConfigured } from '@/lib/sol/anchorClient';
 
 interface Tile {
   id: number;
@@ -127,7 +128,8 @@ const calculateMultiplier = (safeRevealed: number, bombCount: number) => {
 
 export function SoloMinesGame({ onBack }: { onBack?: () => void }) {
     const { addGame, userProfile, totalGames } = useStats();
-    const { connected } = useWallet();
+    const walletCtx = useWallet();
+    const { connected, publicKey } = walletCtx;
     const [state, dispatch] = useReducer(gameReducer, initialState);
     const prevGameState = useRef(state.gameState);
     const [serverSeed, setServerSeed] = useState('');
@@ -146,6 +148,24 @@ export function SoloMinesGame({ onBack }: { onBack?: () => void }) {
             const isLoss = tiles.some(tile => tile.isBomb && tile.isRevealed);
             const clientSeed = userProfile?.clientSeed || 'not_available';
             const nonce = totalGames + 1; // Use next game number as nonce
+
+            // Resolve on-chain outcome (payout and close PDA)
+            if (connected && publicKey && walletCtx.signTransaction && isOnchainConfigured()) {
+                (async () => {
+                    try {
+                        await revealAndResolveSoloOnchain({
+                            wallet: walletCtx as any,
+                            player: publicKey,
+                            nonce,
+                            serverSeed: new Uint8Array(),
+                            playerWon: !isLoss,
+                            payoutMultiplierBps: 0,
+                        });
+                    } catch (e) {
+                        console.error('revealAndResolveSoloOnchain failed', e);
+                    }
+                })();
+            }
 
             if (isLoss) {
                 // Game lost
@@ -183,7 +203,7 @@ export function SoloMinesGame({ onBack }: { onBack?: () => void }) {
         prevGameState.current = gameState;
     }, [gameState, betAmount, currentMultiplier, tiles, addGame, userProfile, totalGames, serverSeed]);
 
-    const initializeGame = useCallback(() => {
+    const initializeGame = useCallback(async () => {
         if (betAmount <= 0) {
             toast({
                 title: "Invalid Bet Amount",
@@ -192,11 +212,38 @@ export function SoloMinesGame({ onBack }: { onBack?: () => void }) {
             });
             return;
         }
+        if (!connected || !publicKey || !walletCtx.signTransaction || !walletCtx.signAllTransactions) {
+            toast({ title: 'Connect Wallet', description: 'Please connect your Solana wallet to play on-chain.', variant: 'destructive' });
+            return;
+        }
+        if (!isOnchainConfigured()) {
+            toast({ title: 'On-chain not configured', description: 'Missing VITE_PROGRAM_ID / RPC. Check .env.', variant: 'destructive' });
+            return;
+        }
+        // Start on-chain: escrow wager into PDA
+        const lamports = Math.max(10_000, Math.round(betAmount * 1_000_000_000)); // min 0.00001 SOL
+        const nonce = totalGames + 1; // stable per current wallet stats
+        try {
+            await startSoloOnchain({
+                wallet: walletCtx as any,
+                player: publicKey,
+                betLamports: lamports,
+                bombs: 0,
+                clientSeed: new Uint8Array(),
+                nonce,
+                serverSeedHash: new Uint8Array(),
+                feeBps: 0,
+            });
+        } catch (e: any) {
+            console.error('startSoloOnchain failed', e);
+            toast({ title: 'Transaction failed', description: e?.message ?? String(e), variant: 'destructive' });
+            return;
+        }
 
         const newServerSeed = crypto.lib.WordArray.random(16).toString();
         setServerSeed(newServerSeed);
         const clientSeed = userProfile?.clientSeed || 'not_available';
-        const nonce = totalGames + 1;
+        // nonce already defined above for on-chain call
 
         const bombPositions = new Set<number>();
         
@@ -217,7 +264,7 @@ export function SoloMinesGame({ onBack }: { onBack?: () => void }) {
             title: "Game Started!",
             description: `${bombCount} bombs hidden. Good luck!`,
         });
-    }, [bombCount, betAmount, connected, userProfile, totalGames, addGame]);
+    }, [bombCount, betAmount, connected, publicKey, walletCtx, userProfile, totalGames, addGame]);
 
     const revealTile = useCallback((tileId: number) => {
         if (gameState !== 'playing') return;
